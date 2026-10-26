@@ -20,7 +20,7 @@ from crosspump.eval.runner import XPRunner
 
 log = get_logger("xp")
 CFG_DIR = os.path.join(ROOT, "configs", "crosspump")
-RESULTS = os.path.join(ROOT, "results", "crosspump")
+RESULTS = os.environ.get("XP_RESULTS", os.path.join(ROOT, "results", "crosspump"))
 CORE_MODULES = ("crosspump.data.synthetic", "crosspump.baselines.common", "crosspump.models.crosspump")
 
 
@@ -61,6 +61,8 @@ def load_cfgs(args) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     if not os.path.exists(ds_path):
         raise FileNotFoundError(f"no dataset config {ds_path}")
     ds_cfg = load_config(ds_path)
+    if os.environ.get("XP_DATA_ROOT"):                    # cq jobs: raw data lives in the project home, not in the checkout
+        ds_cfg["root"] = os.environ["XP_DATA_ROOT"]
     for k in ("lookback", "latency", "exec_max", "vol_window", "neg_subsample"):
         if k in ds_cfg:
             cfg["data"][k] = ds_cfg[k]
