@@ -7,25 +7,26 @@ from __future__ import annotations
 import argparse, concurrent.futures as cf, csv, io, json, os, subprocess, time, urllib.request, zipfile
 from datetime import datetime, timedelta
 
-GIT = {"hu_pd": "https://github.com/Bayi-Hu/Pump-and-Dump-Detection-on-Cryptocurrency", "sapienza_pd": "https://github.com/SystemsLab-Sapienza/pump-and-dump-dataset",
-       "xu_pumpdump": "https://github.com/xujiahuayz/pumpdump", "mirtaheri": "https://github.com/Mehrnoom/Cryptocurrency-Pump-Dump",
-       "nghiem": "https://github.com/hnghiem-nlp/Pump_and_Dump_Crypto", "moura": "https://github.com/Filipey/investigating-cryptocurrency-manipulation-icwsm2027",
-       "ardia": "https://github.com/ArdiaD/PumpDump", "rugpull_defender": "https://github.com/mohamadpishdar/RugPull-Defender"}
-ZENODO = [("memechain/data.zip", "18246856", "data.zip"), ("memechain/README.md", "18246856", "README.md"),
-          ("victor_dex/EtherDollarPrice.csv", "4540223", "EtherDollarPrice.csv"), ("victor_dex/token_decimals.json", "4540223", "token_decimals.json"),
+GIT = {"ardia": "https://github.com/ArdiaD/PumpDump", "sapienza_pd": "https://github.com/SystemsLab-Sapienza/pump-and-dump-dataset",
+       "moura": "https://github.com/Filipey/investigating-cryptocurrency-manipulation-icwsm2027", "nghiem": "https://github.com/hnghiem-nlp/Pump_and_Dump_Crypto",
+       "xu_pumpdump": "https://github.com/xujiahuayz/pumpdump", "rugpull_defender": "https://github.com/mohamadpishdar/RugPull-Defender",
+       "hu_pd": "https://github.com/Bayi-Hu/Pump-and-Dump-Detection-on-Cryptocurrency", "mirtaheri": "https://github.com/Mehrnoom/Cryptocurrency-Pump-Dump"}
+BIG_GIT = ("hu_pd", "mirtaheri")
+ZENODO = [("memechain/README.md", "18246856", "README.md"), ("victor_dex/EtherDollarPrice.csv", "4540223", "EtherDollarPrice.csv"),
+          ("victor_dex/token_decimals.json", "4540223", "token_decimals.json"), ("memechain/data.zip", "18246856", "data.zip"),
           ("victor_dex/EtherDeltaTrades.csv", "4540223", "EtherDeltaTrades.csv"), ("victor_dex/IDEXTrades.csv", "4540223", "IDEXTrades.csv"),
           ("pumpsense/icbc_2026_reproducibility-v1.1.zip", "19616802", "AhmedMahrous00/icbc_2026_reproducibility-v1.1.zip")]
 
 
 def main():
-    ap = argparse.ArgumentParser(); ap.add_argument("--out", required=True); ap.add_argument("--skip-klines", action="store_true"); ap.add_argument("--workers", type=int, default=8)
+    ap = argparse.ArgumentParser(); ap.add_argument("--out", required=True); ap.add_argument("--skip-klines", action="store_true"); ap.add_argument("--workers", type=int, default=8); ap.add_argument("--kline-months", type=int, default=1, help="1 = pump month only, 3 = +-1 month")
     a = ap.parse_args()
     R = os.path.join(a.out, "crosspump"); os.makedirs(R, exist_ok=True)
     man = {"git": {}, "zenodo": {}, "klines": {}}
     steps = len(GIT) + len(ZENODO) + 1; k = 0
     prog = open(os.path.join(a.out, "progress.log"), "a")
     tick = lambda msg: (prog.write(f"{k}/{steps} {msg}\n"), prog.flush())
-    for name, url in GIT.items():
+    def git_one(name, url):
         d = os.path.join(R, name)
         how = "existing"
         if not os.path.isdir(d) or not os.listdir(d):
@@ -37,7 +38,15 @@ def main():
             rc = 0
         commit = subprocess.run(["git", "-C", d, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() if how == "git" and rc == 0 else None
         man["git"][name] = {"url": url, "rc": rc, "via": how, "commit": commit}
-        k += 1; tick(f"git {name} rc={rc}")
+        return rc
+    for name, url in GIT.items():
+        if name in BIG_GIT:
+            continue
+        rc = git_one(name, url); k += 1; tick(f"git {name} rc={rc}")
+    if not a.skip_klines:
+        man["klines"] = fetch_klines(R, a.workers, a.kline_months)
+        json.dump(man, open(os.path.join(a.out, "fetch_manifest.json"), "w"), indent=1)
+    k += 1; tick(f"klines {json.dumps({s_: sum(1 for v in man['klines'].values() if v == s_) for s_ in set(man['klines'].values())})}")
     for rel, rec, fname in ZENODO:
         dst = os.path.join(R, rel); os.makedirs(os.path.dirname(dst), exist_ok=True)
         url = f"https://zenodo.org/records/{rec}/files/{fname}?download=1"
@@ -47,9 +56,12 @@ def main():
             rc = 0
         man["zenodo"][rel] = {"record": rec, "rc": rc, "bytes": os.path.getsize(dst) if os.path.exists(dst) else 0}
         k += 1; tick(f"zenodo {rel} rc={rc}")
-    if not a.skip_klines:
-        man["klines"] = fetch_klines(R, a.workers)
-    k += 1; tick(f"klines {json.dumps({s: sum(1 for v in man['klines'].values() if v == s) for s in set(man['klines'].values())})}")
+        json.dump(man, open(os.path.join(a.out, "fetch_manifest.json"), "w"), indent=1)
+    for name in BIG_GIT:
+        rc = git_one(name, GIT[name]); k += 1; tick(f"git {name} rc={rc}")
+        json.dump(man, open(os.path.join(a.out, "fetch_manifest.json"), "w"), indent=1)
+    if not a.skip_klines:                                        # hu_pd arrives late: top up klines for its pumps (existing files skipped)
+        man["klines"] = fetch_klines(R, a.workers, a.kline_months)
     json.dump(man, open(os.path.join(a.out, "fetch_manifest.json"), "w"), indent=1)
     prog.write("done\n"); prog.close()
 
@@ -76,14 +88,15 @@ def codeload(url: str, d: str) -> int:
     return 0
 
 
-def fetch_klines(R: str, workers: int):
+def fetch_klines(R: str, workers: int, n_months: int = 1):
     """Binance 1-minute klines (data.binance.vision) for every Binance BTC-pair pump in the Hu, Sapienza and Ardia tables, +-1 month."""
     pairs = set()
     def months(dt):
-        for d in (-30, 0, 30):
+        for d in ((0,) if n_months <= 1 else (-30, 0, 30)):
             m = dt + timedelta(days=d); yield f"{m.year:04d}-{m.month:02d}"
+    hu = os.path.join(R, "hu_pd/Data/Telegram/Labeled/PD_logs_cleaned.txt")
     try:
-        for r in csv.DictReader(open(os.path.join(R, "hu_pd/Data/Telegram/Labeled/PD_logs_cleaned.txt")), delimiter="\t"):
+        for r in (csv.DictReader(open(hu), delimiter="\t") if os.path.exists(hu) else []):
             if r["exchange"].strip().lower() == "binance" and r["pair"].strip().upper() == "BTC":
                 for m in months(datetime.fromisoformat(r["timestamp"].strip().replace("+00:00", ""))): pairs.add((r["coin"].strip().upper(), m))
         for r in csv.DictReader(open(os.path.join(R, "sapienza_pd/pump_telegram.csv"))):
