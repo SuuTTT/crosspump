@@ -27,8 +27,16 @@ def main():
     tick = lambda msg: (prog.write(f"{k}/{steps} {msg}\n"), prog.flush())
     for name, url in GIT.items():
         d = os.path.join(R, name)
-        rc = 0 if os.path.isdir(os.path.join(d, ".git")) else subprocess.call(["git", "clone", "-q", "--depth", "1", url, d])
-        man["git"][name] = {"url": url, "rc": rc, "commit": subprocess.run(["git", "-C", d, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() if rc == 0 else None}
+        how = "existing"
+        if not os.path.isdir(d) or not os.listdir(d):
+            rc = subprocess.call(["git", "clone", "-q", "--depth", "1", url, d], stderr=subprocess.DEVNULL, timeout=3600) if not os.environ.get("XP_NO_GIT") else 1
+            how = "git"
+            if rc != 0:                                   # github.com blocked: fall back to the codeload archive of the default branch
+                rc, how = codeload(url, d), "codeload"
+        else:
+            rc = 0
+        commit = subprocess.run(["git", "-C", d, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() if how == "git" and rc == 0 else None
+        man["git"][name] = {"url": url, "rc": rc, "via": how, "commit": commit}
         k += 1; tick(f"git {name} rc={rc}")
     for rel, rec, fname in ZENODO:
         dst = os.path.join(R, rel); os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -44,6 +52,28 @@ def main():
     k += 1; tick(f"klines {json.dumps({s: sum(1 for v in man['klines'].values() if v == s) for s in set(man['klines'].values())})}")
     json.dump(man, open(os.path.join(a.out, "fetch_manifest.json"), "w"), indent=1)
     prog.write("done\n"); prog.close()
+
+
+def codeload(url: str, d: str) -> int:
+    """Download https://codeload.github.com/<owner>/<repo>/zip/HEAD and unpack it into d (top folder stripped)."""
+    import shutil, tempfile
+    owner_repo = url.rstrip("/").split("github.com/")[1]
+    tmp = tempfile.mkdtemp(dir=os.path.dirname(d))
+    z = os.path.join(tmp, "src.zip")
+    for ref in ("HEAD", "refs/heads/master", "refs/heads/main"):
+        rc = subprocess.call(["curl", "-sS", "-L", "--retry", "5", "-f", "-o", z, f"https://codeload.github.com/{owner_repo}/zip/{ref}"])
+        if rc == 0:
+            break
+    if rc != 0:
+        shutil.rmtree(tmp, ignore_errors=True); return rc
+    with zipfile.ZipFile(z) as zf:
+        zf.extractall(tmp)
+    top = [x for x in os.listdir(tmp) if x != "src.zip"][0]
+    if os.path.isdir(d):
+        shutil.rmtree(d)
+    shutil.move(os.path.join(tmp, top), d)
+    shutil.rmtree(tmp, ignore_errors=True)
+    return 0
 
 
 def fetch_klines(R: str, workers: int):
